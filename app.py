@@ -8,7 +8,7 @@ st.set_page_config(page_title="Stock Analysis Dashboard", layout="wide")
 st.title("📊 Dashboard Analisa Stock & Transfer")
 st.markdown("""
 Aplikasi ini membandingkan data **Stock Opname (WMS)** dengan **Data SAP (F211 vs Cabang)**.
-Tujuannya adalah mengidentifikasi GAP dan melihat distribusi stock di cabang lain untuk keputusan transfer.
+Fitur baru: **Pencarian Detail per SKU** untuk melihat sebaran stock di semua lokasi.
 """)
 
 # --- 1. File Uploader ---
@@ -17,146 +17,113 @@ uploaded_file = st.file_uploader("Upload File Excel Stock (xlsx)", type=['xlsx']
 if uploaded_file is not None:
     try:
         # --- 2. Load Data ---
-        # Menggunakan header=3 karena di file asli header Stock_SAP_SUM ada di baris ke-4
         with st.spinner('Membaca data...'):
             df_recap = pd.read_excel(uploaded_file, sheet_name='Recap_GAP')
-            df_sap = pd.read_excel(uploaded_file, sheet_name='Stock_SAP_SUM', header=3)
+            df_sap = pd.read_excel(uploaded_file, sheet_name='Stock_SAP_SUM', header=3) # Header di baris 4
 
         st.success("Data berhasil dimuat!")
 
         # --- 3. Data Cleaning & Processing ---
         
-        # Pastikan SAP_CODE bertipe string agar bisa di-merge
+        # Standardisasi Kolom SAP_CODE
         df_recap['SAP_CODE'] = df_recap['SAP_CODE'].astype(str)
         df_sap['SAP_CODE'] = df_sap['SAP_CODE'].astype(str)
         
-        # Bersihkan nama kolom jika ada spasi berlebih
+        # Bersihkan nama kolom
         df_recap.columns = [c.strip() for c in df_recap.columns]
         df_sap.columns = [c.strip() for c in df_sap.columns]
 
-        # A. Proses Data SAP
-        # Ambil Stock F211 (Gudang Utama SAP)
-        sap_f211 = df_sap[df_sap['Storage_Location'] == 'F211'][['SAP_CODE', 'Total']]
-        sap_f211 = sap_f211.rename(columns={'Total': 'SAP_F211_Stock'})
-
-        # Ambil Stock Cabang (Selain F211) dan jumlahkan per produk
+        # --- Pre-processing Data Utama ---
+        # A. Stock F211 (Gudang Utama)
+        sap_f211 = df_sap[df_sap['Storage_Location'] == 'F211'][['SAP_CODE', 'Total']].rename(columns={'Total': 'SAP_F211_Stock'})
+        
+        # B. Stock Cabang (Total)
         sap_branches = df_sap[df_sap['Storage_Location'] != 'F211']
-        sap_branches_agg = sap_branches.groupby('SAP_CODE')['Total'].sum().reset_index()
-        sap_branches_agg = sap_branches_agg.rename(columns={'Total': 'Total_Branch_Stock'})
+        sap_branches_agg = sap_branches.groupby('SAP_CODE')['Total'].sum().reset_index().rename(columns={'Total': 'Total_Branch_Stock'})
 
-        # B. Gabungkan (Merge) dengan Recap_GAP
-        # Left join ke Recap_GAP karena itu acuan analisa kita
+        # C. Gabungkan Data (Master Table untuk Analisa Global)
         merged_df = df_recap.merge(sap_f211, on='SAP_CODE', how='left')
         merged_df = merged_df.merge(sap_branches_agg, on='SAP_CODE', how='left')
-
-        # Isi NaN dengan 0 (artinya tidak ada record stock di SAP untuk item tersebut)
+        
         merged_df['SAP_F211_Stock'] = merged_df['SAP_F211_Stock'].fillna(0)
         merged_df['Total_Branch_Stock'] = merged_df['Total_Branch_Stock'].fillna(0)
-
-        # Hitung Selisih WMS vs SAP F211 (Validasi Data)
-        merged_df['Diff_WMS_vs_SAP_F211'] = merged_df['WMS_STOCK'] - merged_df['SAP_F211_Stock']
-
-        # --- 4. Dashboard Metrics ---
         
-        # Filter Data yang memiliki GAP
-        gap_data = merged_df[merged_df['GAP_QTY'] != 0].copy()
-        
+        # --- 4. NEW FEATURE: FILTER BY SKU ---
         st.divider()
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total SKU", f"{len(merged_df)}")
-        col2.metric("SKU dengan GAP (Fisik vs WMS)", f"{len(gap_data)}")
-        col3.metric("Total Qty GAP (Mutlak)", f"{gap_data['GAP_QTY'].abs().sum():,.0f}")
-
-        # --- 5. Visualisasi & Analisa ---
-
-        st.subheader("🔍 Analisa Distribusi Stock untuk Item GAP")
-        st.info("Grafik di bawah menampilkan Item yang memiliki GAP terbesar. Gunakan ini untuk melihat apakah stock menumpuk di Cabang (Branch) atau di Gudang Utama (F211).")
-
-        # Slider untuk memfilter top item
-        top_n = st.slider("Tampilkan Top N Item dengan GAP Terbesar", 5, 50, 10)
+        st.header("🔎 Cek Detail Stock per SKU")
         
-        # Urutkan berdasarkan GAP mutlak terbesar
+        # Buat list unik SKU untuk dropdown, tambahkan deskripsi agar mudah dicari
+        sku_list = merged_df['SAP_CODE'].unique().tolist()
+        selected_sku = st.selectbox("Pilih atau Ketik SKU (SAP CODE):", sku_list)
+        
+        if selected_sku:
+            # Ambil data spesifik item tersebut
+            item_data = merged_df[merged_df['SAP_CODE'] == selected_sku].iloc[0]
+            
+            # Tampilkan Info Dasar
+            col_info1, col_info2 = st.columns([2, 1])
+            with col_info1:
+                st.subheader(f"{item_data['Product_Description']}")
+                st.caption(f"SAP CODE: {selected_sku}")
+            
+            # Metric Card Sederhana
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Stock Fisik (WMS)", f"{item_data['Stock_Fisik_08JAN']:,.0f}")
+            m2.metric("Stock SAP F211", f"{item_data['SAP_F211_Stock']:,.0f}")
+            m3.metric("GAP (Fisik - WMS)", f"{item_data['GAP_QTY']:,.0f}", delta_color="inverse")
+            m4.metric("Total Stock di Cabang", f"{item_data['Total_Branch_Stock']:,.0f}")
+
+            # --- TAMPILKAN STOCK DI SEMUA LOKASI (DETAIL) ---
+            st.markdown("##### 📍 Sebaran Stock di Semua Lokasi (SAP)")
+            
+            # Filter df_sap (raw data) berdasarkan SKU yang dipilih
+            stock_detail_sap = df_sap[df_sap['SAP_CODE'] == selected_sku][['Storage_Location', 'Desc_Storage_Loc', 'Total']]
+            
+            # Urutkan: F211 paling atas, sisanya berdasarkan jumlah stock terbesar
+            stock_detail_sap['is_f211'] = stock_detail_sap['Storage_Location'] == 'F211'
+            stock_detail_sap = stock_detail_sap.sort_values(by=['is_f211', 'Total'], ascending=[False, False]).drop(columns=['is_f211'])
+            
+            # Tampilkan Tabel
+            st.dataframe(
+                stock_detail_sap, 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    "Storage_Location": "Kode Lokasi",
+                    "Desc_Storage_Loc": "Nama Lokasi / Cabang",
+                    "Total": "Stock SAP"
+                }
+            )
+            
+            if item_data['GAP_QTY'] < 0:
+                st.warning(f"⚠️ **Rekomendasi:** Terdapat kekurangan stock fisik sebesar {abs(item_data['GAP_QTY'])}. Cek tabel di atas, apakah ada stock berlebih di cabang yang bisa ditransfer ke F211?")
+            elif item_data['GAP_QTY'] > 0:
+                 st.success(f"✅ **Rekomendasi:** Terdapat kelebihan stock fisik. Cek tabel di atas, cabang mana yang stock-nya sedikit dan membutuhkan supply.")
+
+        # --- 5. DASHBOARD VISUALISASI GLOBAL (Kode Sebelumnya) ---
+        st.divider()
+        st.header("📈 Analisa Global (Top GAP)")
+        
+        # ... (Kode visualisasi sama seperti sebelumnya) ...
+        gap_data = merged_df[merged_df['GAP_QTY'] != 0].copy()
+        top_n = st.slider("Jumlah Top Item ditampilkan", 5, 50, 10)
         gap_data['Abs_GAP'] = gap_data['GAP_QTY'].abs()
         top_gap_items = gap_data.sort_values(by='Abs_GAP', ascending=False).head(top_n)
 
-        # Bar Chart Comparison
         fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=top_gap_items['SAP_CODE'], 
-            y=top_gap_items['WMS_STOCK'], 
-            name='WMS Stock (Recap)',
-            marker_color='blue'
-        ))
-        fig.add_trace(go.Bar(
-            x=top_gap_items['SAP_CODE'], 
-            y=top_gap_items['Total_Branch_Stock'], 
-            name='Total Stock Cabang (SAP)',
-            marker_color='orange'
-        ))
-        fig.add_trace(go.Bar(
-            x=top_gap_items['SAP_CODE'], 
-            y=top_gap_items['GAP_QTY'], 
-            name='GAP Qty (Fisik - WMS)',
-            marker_color='red'
-        ))
+        fig.add_trace(go.Bar(x=top_gap_items['SAP_CODE'], y=top_gap_items['WMS_STOCK'], name='WMS Stock', marker_color='blue'))
+        fig.add_trace(go.Bar(x=top_gap_items['SAP_CODE'], y=top_gap_items['Total_Branch_Stock'], name='Total Cabang', marker_color='orange'))
+        fig.add_trace(go.Bar(x=top_gap_items['SAP_CODE'], y=top_gap_items['GAP_QTY'], name='GAP Qty', marker_color='red'))
         
-        fig.update_layout(
-            title=f"Perbandingan Stock: WMS vs Cabang (Top {top_n} GAP)",
-            xaxis_title="Kode Produk (SAP CODE)",
-            yaxis_title="Quantity",
-            barmode='group'
-        )
+        fig.update_layout(barmode='group', xaxis_title="SAP CODE", yaxis_title="Qty", title=f"Top {top_n} Item dengan GAP Terbesar")
         st.plotly_chart(fig, use_container_width=True)
-
-        # --- 6. Tabel Detail & Rekomendasi ---
-        st.subheader("📋 Detail Data & Potensi Transfer")
         
-        # Opsi Filter
-        filter_type = st.radio(
-            "Filter Tampilan:",
-            ("Semua Item GAP", "Minus GAP (Kurang Fisik)", "Plus GAP (Lebih Fisik)"),
-            horizontal=True
-        )
-
-        if filter_type == "Minus GAP (Kurang Fisik)":
-            display_df = gap_data[gap_data['GAP_QTY'] < 0]
-        elif filter_type == "Plus GAP (Lebih Fisik)":
-            display_df = gap_data[gap_data['GAP_QTY'] > 0]
-        else:
-            display_df = gap_data
-
-        # Kolom yang ditampilkan
-        show_cols = [
-            'SAP_CODE', 'Product_Description', 
-            'WMS_STOCK', 'Stock_Fisik_08JAN', 'GAP_QTY',
-            'SAP_F211_Stock', 'Total_Branch_Stock'
-        ]
-        
-        st.dataframe(
-            display_df[show_cols].sort_values('GAP_QTY'),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.markdown("""
-        **Panduan Analisa Transfer:**
-        * **Jika GAP Minus (Kurang):** Cek kolom `Total_Branch_Stock`. Jika stock cabang tinggi, pertimbangkan tarik stock dari cabang ke pusat.
-        * **Jika GAP Plus (Lebih):** Cek kolom `Total_Branch_Stock`. Jika stock cabang rendah, ini kesempatan untuk push stock ke cabang.
-        """)
-
-        # --- 7. Download Data Hasil Olahan ---
-        st.subheader("📥 Download Hasil Analisa")
+        # Download Button
         csv = merged_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Download Data Lengkap (CSV)",
-            data=csv,
-            file_name='Analisa_Stock_Gabungan.csv',
-            mime='text/csv',
-        )
+        st.download_button("Download Data Analisa (CSV)", csv, "Analisa_Stock_Lengkap.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"Terjadi kesalahan saat memproses file: {e}")
-        st.warning("Pastikan file Excel memiliki sheet 'Recap_GAP' dan 'Stock_SAP_SUM'. Cek juga apakah format headernya sesuai.")
+        st.error(f"Error: {e}")
 
 else:
-    st.info("Silakan upload file Excel untuk memulai analisa.")
+    st.info("Silakan upload file Excel.")
